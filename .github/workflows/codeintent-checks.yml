@@ -1,0 +1,126 @@
+name: CodeIntent Checks
+
+# This trusted base-branch workflow never checks out or executes PR code.
+# It downloads the textual diff for TypeSafe and lets the Lambda run checks.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: codeintent-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      API_URL: ${{ vars.CODEINTENT_API_URL || 'https://qgd63ljozc.execute-api.us-east-1.amazonaws.com/demo/verify-semantic' }}
+      STATUS_API_URL: ${{ vars.CODEINTENT_STATUS_API_URL || 'https://qgd63ljozc.execute-api.us-east-1.amazonaws.com/demo/status' }}
+      STATUS_PAGE_URL: ${{ vars.CODEINTENT_STATUS_PAGE_URL || 'https://scottswindell-hub.github.io/fineract/' }}
+      API_KEY: ${{ secrets.DRIFT_GATE_API_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      PR_OWNER: ${{ github.repository_owner }}
+      PR_REPO: ${{ github.event.repository.name }}
+      PR_FULL_REPO: ${{ github.repository }}
+      PR_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+      PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+
+    steps:
+      - name: Publish live status link
+        run: |
+          set -euo pipefail
+          dashboard_url=$(python3 -c 'import os,urllib.parse; print(os.environ["STATUS_PAGE_URL"].rstrip("/") + "/?" + urllib.parse.urlencode({"sha":os.environ["PR_SHA"],"api":os.environ["STATUS_API_URL"].rsplit("/status",1)[0],"pr":os.environ["PR_NUMBER"],"repo":os.environ["PR_FULL_REPO"]}))')
+          echo "DASHBOARD_URL=$dashboard_url" >> "$GITHUB_ENV"
+          marker='<!-- codeintent-checks -->'
+          body="$marker
+          ### CodeIntent checks
+
+          [▶ Watch the checks run live ↗]($dashboard_url)"
+          comment_id=$(gh api "repos/$PR_FULL_REPO/issues/$PR_NUMBER/comments" --paginate --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" | head -1)
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH "repos/$PR_FULL_REPO/issues/comments/$comment_id" -f body="$body" >/dev/null
+          else
+            gh api --method POST "repos/$PR_FULL_REPO/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+          fi
+
+      - name: Start dependency-aware checks
+        run: |
+          set -euo pipefail
+          if [ -z "$API_KEY" ]; then
+            echo "::error::Configure the DRIFT_GATE_API_KEY repository secret."
+            exit 1
+          fi
+
+          previous_started_at=$(curl -fsS --get "$STATUS_API_URL" \
+            --data-urlencode "sha=$PR_SHA" --data-urlencode "repo=$PR_FULL_REPO" \
+            | jq -r '.started_at // empty' || true)
+          echo "PREVIOUS_STARTED_AT=$previous_started_at" >> "$GITHUB_ENV"
+
+          gh api -H 'Accept: application/vnd.github.v3.diff' \
+            "repos/$PR_FULL_REPO/pulls/$PR_NUMBER" > /tmp/pr.diff
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("/tmp/pr.diff", encoding="utf-8", errors="replace") as stream:
+              diff = stream.read()
+          payload = {
+              "pipeline": "typesafe-checks-v1",
+              "owner": os.environ["PR_OWNER"],
+              "repo": os.environ["PR_REPO"],
+              "sha": os.environ["PR_SHA"],
+              "diff": diff,
+              "base_ref": os.environ["PR_BASE_REF"],
+              "pr_ref": os.environ["PR_HEAD_REF"],
+              "pull_request_number": int(os.environ["PR_NUMBER"]),
+              "pull_request_title": os.environ["PR_TITLE"],
+          }
+          with open("/tmp/codeintent-payload.json", "w", encoding="utf-8") as stream:
+              json.dump(payload, stream)
+          PY
+
+          code=$(curl -sS -o /tmp/codeintent-response.json -w '%{http_code}' \
+            -X POST "$API_URL" -H 'Content-Type: application/json' \
+            -H "x-api-key: $API_KEY" -d @/tmp/codeintent-payload.json)
+          case "$code" in
+            200|202) echo "CodeIntent checks started." ;;
+            *) cat /tmp/codeintent-response.json; echo "HTTP $code"; exit 1 ;;
+          esac
+
+      - name: Wait for check result
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 840))
+          while (( SECONDS < deadline )); do
+            document=$(curl -fsS --get "$STATUS_API_URL" \
+              --data-urlencode "sha=$PR_SHA" --data-urlencode "repo=$PR_FULL_REPO" || true)
+            if [ -z "$document" ]; then document='{}'; fi
+            state=$(jq -r '.state // "absent"' <<<"$document")
+            started_at=$(jq -r '.started_at // empty' <<<"$document")
+            pipeline=$(jq -r '.pipeline // empty' <<<"$document")
+
+            if { [ "$started_at" = "${PREVIOUS_STARTED_AT:-}" ] && [ -n "$started_at" ]; } || \
+               { [ "$state" = "completed" ] && [ "$pipeline" != "typesafe-checks-v1" ]; }; then
+              echo "Waiting for this run to replace the prior result..."
+            elif [ "$state" = "completed" ]; then
+              verdict=$(jq -r '.verdict // "UNKNOWN"' <<<"$document")
+              jq -r '.checks[]? | "\(.label): \(.state) — \(.detail // "")"' <<<"$document"
+              echo "[Open the live report ↗]($DASHBOARD_URL)" >> "$GITHUB_STEP_SUMMARY"
+              [ "$verdict" = "PASS" ] && exit 0
+              echo "::error::CodeIntent completed with $verdict"
+              exit 1
+            else
+              echo "CodeIntent state: $state — $DASHBOARD_URL"
+            fi
+            sleep 5
+          done
+          echo "::error::CodeIntent checks timed out."
+          exit 1
