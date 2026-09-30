@@ -90,13 +90,27 @@ jobs:
               json.dump(payload, stream)
           PY
 
-          code=$(curl -sS -o /tmp/codeintent-response.json -w '%{http_code}' \
-            -X POST "$API_URL" -H 'Content-Type: application/json' \
-            -H "x-api-key: $API_KEY" -d @/tmp/codeintent-payload.json)
-          case "$code" in
-            200|202) echo "CodeIntent checks started." ;;
-            *) cat /tmp/codeintent-response.json; echo "HTTP $code"; exit 1 ;;
-          esac
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -sS -o /tmp/codeintent-response.json -w '%{http_code}' \
+              -X POST "$API_URL" -H 'Content-Type: application/json' \
+              -H "x-api-key: $API_KEY" -d @/tmp/codeintent-payload.json)
+            case "$code" in
+              200|202)
+                echo "CodeIntent checks started."
+                break
+                ;;
+              403|429|5??)
+                if [ "$attempt" -lt 5 ]; then
+                  echo "Gateway returned HTTP $code; retrying ($attempt/5)..."
+                  sleep $((attempt * 2))
+                  continue
+                fi
+                ;;
+            esac
+            cat /tmp/codeintent-response.json
+            echo "HTTP $code"
+            exit 1
+          done
 
       - name: Wait for check result
         run: |
