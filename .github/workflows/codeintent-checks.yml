@@ -9,6 +9,7 @@ on:
 permissions:
   contents: read
   issues: write
+  pull-requests: write
 
 concurrency:
   group: codeintent-${{ github.event.pull_request.number }}
@@ -44,11 +45,13 @@ jobs:
           ### CodeIntent checks
 
           [▶ Watch the checks run live ↗]($dashboard_url)"
-          comment_id=$(gh api "repos/$PR_FULL_REPO/issues/$PR_NUMBER/comments" --paginate --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" | head -1)
+          comment_id=$(gh api "repos/$PR_FULL_REPO/issues/$PR_NUMBER/comments" --paginate --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" | head -1 || true)
           if [ -n "$comment_id" ]; then
-            gh api --method PATCH "repos/$PR_FULL_REPO/issues/comments/$comment_id" -f body="$body" >/dev/null
+            gh api --method PATCH "repos/$PR_FULL_REPO/issues/comments/$comment_id" -f body="$body" >/dev/null || \
+              echo "::warning::Could not update the live-status PR comment."
           else
-            gh api --method POST "repos/$PR_FULL_REPO/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+            gh api --method POST "repos/$PR_FULL_REPO/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null || \
+              echo "::warning::Could not create the live-status PR comment."
           fi
 
       - name: Start dependency-aware checks
