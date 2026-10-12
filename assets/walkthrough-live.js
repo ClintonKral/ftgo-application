@@ -13,7 +13,7 @@ const api=(qs.get('api')||'').replace(/\/+$/,'');
 let dataPath=qs.get('data')||'';
 const {ANALYSIS,REVIEW}=walkthroughPipeline;
 const initialView=qs.get('view')==='checks'?'checks':'review';
-const state={desc:walkthroughPipeline.isDescriptionRoute(qs),status:null,packet:null,packetDigest:null,summary:null,model:null,view:initialView,selected:initialView==='review'?(qs.get('item')||null):null,tab:'obj',node:null,full:false,evidenceFile:'',methods:{},drafts:new Map(),saves:new Map(),reviewScope:null,commentBody:'',commentChecked:0,error:'',loadingArtifact:false};
+const state={desc:qs.get('view')==='desc',status:null,packet:null,packetDigest:null,summary:null,model:null,view:initialView,selected:initialView==='review'?(qs.get('item')||null):null,tab:'obj',node:null,full:false,evidenceFile:'',methods:{},drafts:new Map(),saves:new Map(),reviewScope:null,commentBody:'',commentChecked:0,error:'',loadingArtifact:false};
 let pollTimer=null;
 let assessmentResize=null;
 let returnCommentId=/^[0-9]+$/.test(qs.get('comment')||'')?qs.get('comment'):null;
@@ -40,18 +40,16 @@ function confirmed(item){
  return codeIntentFindingReviews.recorded(target,state.commentBody)&&(!draft||draft===(target.finding.review.decision==='accepted'?'yes':'no'));
 }
 async function refreshReviewComment(){
- if(!returnCommentId||Date.now()-state.commentChecked<30000)return false;
+ if(!returnCommentId||Date.now()-state.commentChecked<30000)return;
  const pending=checks().some(check=>(check.findings||[]).some(finding=>finding.review?.record&&!codeIntentFindingReviews.recorded({finding},state.commentBody)));
- if(!pending)return false;
+ if(!pending)return;
  state.commentChecked=Date.now();
  try{
   const response=await fetch(`https://api.github.com/repos/${repo.split('/').map(encodeURIComponent).join('/')}/issues/comments/${returnCommentId}`,{cache:'no-store'});
-  if(!response.ok)return false;
+  if(!response.ok)return;
   const comment=await response.json();
-  const body=comment.user?.login==='github-actions[bot]'?comment.body||'':'';
-  if(body===state.commentBody)return false;
-  state.commentBody=body;return true;
- }catch(error){return false;/* Keep the recorded decision; do not claim the comment was refreshed. */}
+  state.commentBody=comment.user?.login==='github-actions[bot]'?comment.body||'':'';
+ }catch(error){/* Keep the recorded decision; do not claim the comment was refreshed. */}
 }
 function pullRequestUrl(){
  const parts=repo.split('/');
@@ -112,7 +110,7 @@ async function loadText(reference,maxBytes,digest){
  return new TextDecoder().decode(bytes);
 }
 async function loadArtifacts(){
- if(state.loadingArtifact||state.packet||!dataPath)return false;
+ if(state.loadingArtifact||state.packet||!dataPath)return;
  state.loadingArtifact=true;
  try{
   const reference=state.status?.review_artifact;
@@ -168,29 +166,23 @@ async function loadArtifacts(){
   }
   const model=reviewExplorer.enrich(codeIntentReviewModel(packet,loadedSummary||{},[],checks()),packet,loadedSummary,checks());
   state.packet=packet;state.packetDigest=digest||null;state.summary=loadedSummary;state.model=model;
-  return true;
- }catch(error){state.error='Review evidence unavailable: '+error.message;return true;}
- finally{state.loadingArtifact=false;}
+ }catch(error){state.error='Review evidence unavailable: '+error.message;}
+ finally{state.loadingArtifact=false;render();}
 }
 async function poll(){
- let changed=false;
  try{
   if(!api||!repo||!sha)throw Error('This link is missing api, repo, or sha.');
   const response=await fetch(statusUrl(),{cache:'no-store'});if(!response.ok)throw Error('Status returned HTTP '+response.status+'.');
-  const nextStatus=await response.json();
-  changed=JSON.stringify(nextStatus)!==JSON.stringify(state.status)||!!state.error;
-  state.status=nextStatus;state.error='';
+  state.status=await response.json();state.error='';
   const reference=state.status?.review_artifact;
   if(!dataPath&&reference?.schema==='review-artifact-reference-v1'&&reference.name==='intent-flow.json'){
    const artifact=new URL(statusUrl());artifact.searchParams.set('detail','review-artifact');artifact.searchParams.set('name',reference.name);dataPath=artifact.href;
   }
   if(state.packet&&reference?.sha256&&reference.sha256!==state.packetDigest){state.packet=null;state.summary=null;state.model=null;}
-  if(state.packet){
-   if(changed){state.packet.explorer.results={checks:checks()};state.model=reviewExplorer.enrich(codeIntentReviewModel(state.packet,state.summary||{},[],checks()),state.packet,state.summary,checks());}
-  }else changed=await loadArtifacts()||changed;
- }catch(error){const message='Live pipeline unavailable: '+error.message;changed=message!==state.error;state.error=message;}
- const commentChanged=await refreshReviewComment();
- if(changed||commentChanged)render({preserveScroll:true});
+  if(state.packet){state.packet.explorer.results={checks:checks()};state.model=reviewExplorer.enrich(codeIntentReviewModel(state.packet,state.summary||{},[],checks()),state.packet,state.summary,checks());}
+  else await loadArtifacts();
+ }catch(error){state.error='Live pipeline unavailable: '+error.message;}
+ await refreshReviewComment();render();
  pollTimer=setTimeout(poll,state.status?.state==='completed'?15000:1500);
 }
 
@@ -209,7 +201,7 @@ function checkExplanation(){
  const check=checks().find(value=>value.id===id);
  if(!check)return `<section class="notice"><h2>Check explanation</h2><p>${state.status?'This check is not present in the recorded run.':'Loading the recorded check…'}</p></section>`;
  const findings=(check.findings||[]).filter(value=>value&&typeof value==='object');
- return `<section class="notice" id="check-explanation"><h2>${esc(check.label||check.id)}</h2><p><b>${esc(check.state||'pending')}</b>: ${esc(check.detail||check.summary||'No additional explanation was recorded.')}</p>${findings.length?`<ul>${findings.map(f=>`<li><b>${esc(f.title||f.rule_id||f.name||'Finding')}</b>${f.detail||f.reason||f.observation?`: ${esc(f.detail||f.reason||f.observation)}`:''}</li>`).join('')}</ul>`:''}</section>`;
+ return `<section class="notice" id="check-explanation"><h2>${esc(check.label||check.id)}</h2><p><b>${esc(check.state||'pending')}</b>: ${esc(check.detail||check.summary||'No additional explanation was recorded.')}</p>${findings.length?`<ul>${findings.map(f=>`<li><b>${esc(f.title||f.rule_id||f.name||'Finding')}</b>${f.detail||f.reason||f.observation?`: ${esc(f.detail||f.reason||f.observation)}`:''}</li>`).join('')}</ul>`:''}<p><button type="button" class="btn blue" data-act="open">Review supporting evidence →</button></p></section>`;
 }
 function checksScreen(){
  const analysis=walkthroughPipeline.phase(checks(),ANALYSIS,'Waiting for source analysis');
@@ -310,9 +302,9 @@ function detailScreen(item){
   ${interpretation}
   <div class="diffs">
    <section class="pane"><header><b>Intent</b><span>${esc(label(item.concept))}</span></header>${intent.length?`<pre>${lines(intent)}</pre>`:'<p class="evidence-empty">No intent comparison recorded for this item.</p>'}</section>
-   <section class="pane"><header><b>Code</b><span>${esc(short(item.file))}</span></header>${item.comparison?.before?.text!=null&&item.comparison?.after?.text!=null?`<pre>${lines(sourceLines(item))}</pre>${item.comparison.complete?'':`<p class="evidence-empty">${esc(item.comparison.qualification||'Recorded source excerpt; open more evidence for context.')}</p>`}`:`<p class="evidence-empty">${esc(item.comparison?.reason||'No source comparison recorded for this item. Check the source evidence view for available patches.')}</p>`}</section>
+   <section class="pane"><header><b>Code</b><span>${esc(short(item.file))}</span></header>${item.comparison?.before?.text!=null&&item.comparison?.after?.text!=null?`<pre>${lines(sourceLines(item))}</pre>${item.comparison.complete?'':'<p class="evidence-empty">Recorded source excerpt; open more evidence for context.</p>'}`:'<p class="evidence-empty">No source comparison recorded for this item. Check the source evidence view for available patches.</p>'}</section>
   </div>
-  ${item.status==='unknown'?'<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>LACKS_DETERMINISTIC_EVIDENCE. Review the analysis gap; assessments are unavailable.</b></div>':item.status==='watch'?'<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>This is informational; no response is required.</b></div>':`<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>${esc(question)}</b>${selector}<button type="button" class="choice yes" data-act="yes" ${target&&!save?.busy?'':'disabled'} aria-pressed="${answer==='yes'}">${esc(yes)}</button><button type="button" class="choice no" data-act="no" ${target&&!save?.busy?'':'disabled'} aria-pressed="${answer==='no'}">${esc(no)}</button><button type="button" class="choice return-github" data-act="return-github" ${answer&&target&&!save?.busy&&returnToCommentUrl()?'':'disabled'} aria-busy="${!!save?.busy}"><span class="return-spinner" aria-hidden="true"><img src="assets/checks-running.gif" width="18" height="18" alt=""></span><span>Return to Github</span></button></div>`}
+  ${item.status==='unknown'?'<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>LACKS_DETERMINISTIC_EVIDENCE. Review the analysis gap; assessments are unavailable.</b></div>':item.status==='watch'?'<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>No response required while this rule is under evaluation.</b></div>':`<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>${esc(question)}</b>${selector}<button type="button" class="choice yes" data-act="yes" ${target&&!save?.busy?'':'disabled'} aria-pressed="${answer==='yes'}">${esc(yes)}</button><button type="button" class="choice no" data-act="no" ${target&&!save?.busy?'':'disabled'} aria-pressed="${answer==='no'}">${esc(no)}</button><button type="button" class="choice return-github" data-act="return-github" ${answer&&target&&!save?.busy&&returnToCommentUrl()?'':'disabled'} aria-busy="${!!save?.busy}"><span class="return-spinner" aria-hidden="true"><img src="assets/checks-running.gif" width="18" height="18" alt=""></span><span>Return to Github</span></button></div>`}
   <section class="compact-evidence" aria-labelledby="recorded-evidence-heading"><h4 id="recorded-evidence-heading">Recorded evidence</h4><div id="recorded-evidence">${resolution}${connections}${reviewExplorer.pane(item,state.packet,state.summary,checks(),{tab:state.tab,node:state.node,full:state.full,file:state.evidenceFile,methods:state.methods})}</div></section>
  </article></div>`;
 }
@@ -321,17 +313,7 @@ function acceptanceNotice(){
  if(a?.mode!=='enforce'||a.status==='ready')return '';
  return `<div class="notice"><b>Governance acceptance: ${esc(a.status||'unavailable')}</b><p>${esc(a.reason||'Acceptance is not ready.')}</p><p>This is separate from the source-analysis result.</p></div>`;
 }
-function reviewScroll(){
- return {x:scrollX,y:scrollY,panes:[...screen.querySelectorAll('.pane pre')].map(node=>({top:node.scrollTop,left:node.scrollLeft}))};
-}
-function restoreReviewScroll(saved){
- requestAnimationFrame(()=>{
-  scrollTo(saved.x,saved.y);
-  [...screen.querySelectorAll('.pane pre')].forEach((node,index)=>{const value=saved.panes[index];if(value){node.scrollTop=value.top;node.scrollLeft=value.left;}});
- });
-}
-function render(options={}){
- const saved=options.preserveScroll?reviewScroll():null;
+function render(){
  runContext.textContent=repo+(pr?' · Pull request #'+pr:'');
  const prUrl=pullRequestUrl();prBack.href=prUrl;prBack.hidden=prUrl==='#';
  document.title=`CodeIntent · ${repo||'review'}${pr?' #'+pr:''}`;
@@ -353,9 +335,34 @@ function render(options={}){
   assessmentResize=new ResizeObserver(reserve);assessmentResize.observe(assessment);reserve();
  }
  legacyMethodExplorer.hydrate();
- if(saved)restoreReviewScroll(saved);
 }
 
+// Yes accepts a finding, so it is saved under the reviewer's GitHub identity and
+// waits for the server's receipt. The API says how to prove who is answering: a
+// GitHub sign-in bounce when that is configured (the page resumes this exact
+// request on return), or otherwise a /codeintent-review comment on the PR.
+async function saveYes(request,destination,signInAllowed=true){
+ const scope=request.scope,page=location.href.split('#')[0];
+ try{
+  const token=codeIntentFindingReviews.session();
+  await codeIntentFindingReviews.submit(token?{...request,session:token}:request);
+  location.assign(destination);
+ }catch(error){
+  if(error.signIn&&signInAllowed){codeIntentFindingReviews.forget();codeIntentFindingReviews.signIn({request,destination},page);return;}
+  if(error.confirm){await confirmOnGitHub(request,destination);return;}
+  state.saves.set(scope,{request:error.status===409?null:request,busy:false});render();
+  window.alert(error.signIn?'GitHub sign-in did not complete. Press Return to Github to try again.':error.message);
+ }
+}
+async function confirmOnGitHub(request,destination){
+ const line=codeIntentFindingReviews.command('yes',request.head_sha,request.scope);
+ const message='Confirm your Yes from your GitHub account: post this as a new comment on the pull request.';
+ let copied=false;
+ try{await navigator.clipboard.writeText(line);copied=true;}catch(error){}
+ if(copied)window.alert(message+' It is copied to your clipboard.');
+ else window.prompt(message,line);
+ location.assign(destination.split('#')[0]+'#new_comment_field');
+}
 document.addEventListener('click',async event=>{
  const target=event.target.closest('button,a,[data-row],[data-node],[data-method-id],[data-method-service],input');if(!target)return;
  if(target.closest('.legacy-method-explorer'))return;
@@ -380,8 +387,11 @@ document.addEventListener('click',async event=>{
   if(!answer||prior?.busy)return;
   const request=prior?.request&&prior.request.answer===answer?prior.request:{repository:repo,pull_request:Number(pr),head_sha:sha,scope,answer,expected_review:review.finding.review.record||null,request_id:crypto.randomUUID()};
   state.saves.set(scope,{request,busy:true});render();
+  if(answer==='yes'){await saveYes(request,destination);return;}
   try{
-   codeIntentFindingReviews.queue(request);
+   // No only keeps a finding open, so it stays one anonymous click; a signed-in reviewer is credited.
+   const token=codeIntentFindingReviews.session();
+   codeIntentFindingReviews.queue(token?{...request,session:token}:request);
    await new Promise(resolve=>setTimeout(resolve,5000));
    location.assign(destination);
   }catch(error){
@@ -408,7 +418,7 @@ document.addEventListener('keydown',event=>{
 legacyMethodExplorer.setRender(render);
 addEventListener('popstate',()=>{
  const route=new URLSearchParams(location.search),view=route.get('view')==='checks'?'checks':'review';
- state.desc=walkthroughPipeline.isDescriptionRoute(route);state.view=view;state.selected=view==='review'?(route.get('item')||null):null;render();
+ state.desc=route.get('view')==='desc';state.view=view;state.selected=view==='review'?(route.get('item')||null):null;render();
 });
 const theme=document.querySelector('#theme');
 function setTheme(value){
@@ -419,5 +429,13 @@ function setTheme(value){
 }
 setTheme(localStorage.getItem('codeintent-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'));
 theme.addEventListener('click',()=>{const next=document.documentElement.dataset.theme==='dark'?'light':'dark';localStorage.setItem('codeintent-theme',next);setTheme(next);});
+const signedIn=codeIntentFindingReviews.finishSignIn();
+const resumed=signedIn?.pending?.request,resumeTo=signedIn?.pending?.destination;
+if(resumed)state.drafts.set(resumed.scope,'yes');
 render();poll();resolveReturnComment();
+if(signedIn?.error)setTimeout(()=>window.alert(signedIn.error),0);
+else if(resumed&&/^https:\/\/github\.com\//.test(resumeTo||'')&&resumed.repository===repo&&resumed.head_sha===sha){
+ state.saves.set(resumed.scope,{request:resumed,busy:true});render();
+ saveYes(resumed,resumeTo,false);
+}
 })();
