@@ -30,12 +30,6 @@ function createClient(endpoint=ENDPOINT,transport=(...args)=>fetch(...args)){
 }
 const client=createClient();
 async function submit(request){return client.save(request);}
-// Beacon queues a small POST that survives navigation. Plain text avoids a CORS
-// preflight during unload; the endpoint parses and validates the JSON body.
-function queue(request,beacon=(...args)=>navigator.sendBeacon(...args)){
- const body=new Blob([JSON.stringify(request)],{type:'text/plain;charset=UTF-8'});
- if(!beacon(ENDPOINT,body))throw Error('The browser could not send your answer. Press Return to Github to retry.');
-}
 /* GitHub identity for Yes. The page bounces through GitHub (already signed in there),
    and comes back with a short-lived session signed by the review API. It lives in this
    tab's sessionStorage only; the nonce ties the returning session to the click that asked. */
@@ -71,6 +65,6 @@ function finishSignIn({store=storage(),href=location.href,replace=url=>history.r
  store.setItem(SESSION,fragment.get('codeintent_session'));
  return {session:fragment.get('codeintent_session'),pending};
 }
-root.codeIntentFindingReviews={command,targets,recorded,createClient,submit,queue,session,forget,signIn,finishSignIn};
+root.codeIntentFindingReviews={command,targets,recorded,createClient,submit,session,forget,signIn,finishSignIn};
 if(typeof module!=='undefined')module.exports=root.codeIntentFindingReviews;
 })(typeof window==='undefined'?globalThis:window);
