@@ -16,6 +16,8 @@ function render(packet){
  return `<p><b>${label}</b></p><p>Automated verification was incomplete. Potential issues below are advisory.</p>
  <p>${esc(packet.identity?.repository||'')} · <code>${esc(packet.identity?.head_commit||'')}</code></p>
  <p>Diagnostic reference: <code>${esc(packet.diagnostic_id)}</code></p>
+ <p>${esc(packet.evidence_scope||'Partial source evidence; complete PR coverage is not established.')}</p>
+ ${packet.coverage?`<p class="fallback-coverage">${packet.coverage.complete_pr_diff?'Complete PR diff':'Supplied diff'}: ${esc(packet.coverage.input_files)} changed files · ${esc(packet.coverage.submitted_bytes)} bytes submitted · ${packet.status==='completed'?'analysis completed':'analysis did not complete'}.</p>`:''}
  ${tiles||`<p>${packet.status!=='completed'?esc(packet.reason||'Fallback analysis is unavailable.'):'No potential issues were returned. This does not establish that the PR is safe.'}</p>`}`;
 }
 root.llmErrorReview={render};

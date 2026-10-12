@@ -340,7 +340,7 @@ function render(options={}){
   const route=new URLSearchParams(location.search);
   const item=walkthroughPipeline.descriptionItem(items(),state.packet,state.summary,checks(),route.get('check'),route.get('issue'));
   if(item){state.selected=item.id;screen.innerHTML=detailScreen(item);}
-  else if(state.status?.llm_review)screen.innerHTML='<div class="notice"><h2>Automated verification is incomplete</h2><p>The LLM analysis below reviews the surviving source diff. It cannot establish that the PR is safe or satisfy the incomplete checks.</p></div>';
+  else if(state.status?.llm_review)screen.innerHTML='<div class="notice"><h2>Automated verification is incomplete</h2><p>The advisory analysis below reports its source coverage separately. It does not satisfy the incomplete deterministic checks.</p></div>';
   else screen.innerHTML=`<div class="notice"><h2>${state.model?'Description unavailable':'Loading issue description…'}</h2><p>${state.model?'No matching description was recorded for this issue.':'Loading the pinned review evidence.'}</p>${state.model?checkExplanation():''}</div>`;
  }else if(state.view==='checks')screen.innerHTML=checksScreen();
  else if(state.selected){const item=items().find(value=>value.id===state.selected);screen.innerHTML=item?detailScreen(item):listScreen();}
