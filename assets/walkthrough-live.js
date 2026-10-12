@@ -345,6 +345,10 @@ function render(options={}){
  }else if(state.view==='checks')screen.innerHTML=checksScreen();
  else if(state.selected){const item=items().find(value=>value.id===state.selected);screen.innerHTML=item?detailScreen(item):listScreen();}
  else screen.innerHTML=listScreen();
+ const sizeNotice=(state.status?.checks||[]).find(check=>check.id==='reviewability')?.reviewability;
+ if(sizeNotice&&sizeNotice.band!=='normal'){
+  screen.insertAdjacentHTML('beforeend',`<section class="notice reviewability-notice"><h2>PR reviewability</h2><p>${esc(sizeNotice.message)}</p><p>${esc(sizeNotice.analysis_lines)} counted lines across ${esc(sizeNotice.changed_files)} files · ${esc(sizeNotice.mode)} policy</p></section>`);
+ }
  if(state.status?.llm_review){
   screen.insertAdjacentHTML('beforeend',`<section class="llm-fallback-review">${llmErrorReview.render(state.status.llm_review)}</section>`);
  }
