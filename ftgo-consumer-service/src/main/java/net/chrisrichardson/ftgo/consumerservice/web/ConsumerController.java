@@ -20,8 +20,8 @@ public class ConsumerController {
 
   @RequestMapping(method= RequestMethod.POST)
   public CreateConsumerResponse create(@RequestBody CreateConsumerRequest request) {
-    PersonName name = request.getName();
-    ResultWithEvents<Consumer> result = consumerService.create(new PersonName(name.getFirstName().trim(), name.getLastName().trim()));
+    // Store only the first name; the last name is no longer kept.
+    ResultWithEvents<Consumer> result = consumerService.create(new PersonName(request.getName().getFirstName(), ""));
     return new CreateConsumerResponse(result.result.getId());
   }
 
