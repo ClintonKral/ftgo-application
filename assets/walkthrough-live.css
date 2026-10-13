@@ -271,3 +271,33 @@ details.quiet summary{cursor:pointer;color:var(--muted)}details.quiet summary b{
 .desc-assessment .return-spinner{display:inline-flex;align-items:center;justify-content:flex-start;flex:0 0 1.5em;width:1.5em}
 .desc-assessment .return-spinner img{display:block;width:1.125em;height:1.125em;visibility:hidden;transform:translateY(.06em)}
 .desc-assessment .return-github[aria-busy="true"] .return-spinner img{visibility:visible}
+/* A No reports the finding as incorrect; its optional reason goes to Holonic's review queue. */
+.desc-assessment .incorrect-reason{order:10;flex-basis:100%;display:flex;flex-direction:column;gap:4px;font-weight:600}
+.desc-assessment .incorrect-reason small{font-weight:400;opacity:.8}
+.desc-assessment .incorrect-reason textarea{width:100%;box-sizing:border-box;resize:vertical;font:inherit;font-weight:400;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+.incorrect-reported{border-left:3px solid var(--bad)}
+/* Each finding names its source and says what people configured versus what code analysis derived. */
+.source-links{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline;margin:0 16px 10px;font-size:13px}
+.source-links a{color:var(--blue)}
+.source-links small{color:var(--muted);font-weight:600;letter-spacing:.04em}
+.source-links code{overflow-wrap:anywhere}
+.provenance{margin:8px 16px 0;border:1px solid var(--line);border-radius:8px;padding:8px 12px;background:var(--sunk);font-size:13px}
+.provenance summary{font-weight:600;cursor:pointer}
+.provenance dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 12px;margin:8px 0 0}
+.provenance dt{font-weight:600;color:var(--muted)}
+.provenance dd{margin:0}
+@media(max-width:600px){.provenance dl{grid-template-columns:1fr}}
+/* A finding's callers: other services first, each marked potentially affected or demonstrated. */
+.finding-impact{margin:0 16px 12px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:13px}
+.finding-impact h4{margin:0 0 6px;font-size:14px}
+.finding-impact h5{margin:10px 0 4px;font-size:12px;color:var(--muted);letter-spacing:.03em}
+.finding-impact ul{list-style:none;margin:0;padding:0;display:grid;gap:4px}
+.finding-impact li{display:flex;flex-wrap:wrap;gap:2px 10px;align-items:baseline;padding:4px 8px;border-left:3px solid var(--warn);background:var(--sunk);border-radius:4px}
+.finding-impact li.demonstrated{border-left-color:var(--bad)}
+.finding-impact .impact-origin{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline;margin:0 0 4px}
+.finding-impact .impact-method{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--blue);background:none;border:0;padding:0;cursor:pointer;text-decoration:underline}
+.finding-impact .impact-map{margin-left:auto;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:3px 10px;cursor:pointer}
+.finding-impact .impact-service{color:var(--muted)}
+.finding-impact .impact-tag{font-size:12px}
+.finding-impact .impact-path{flex-basis:100%;color:var(--muted);overflow-wrap:anywhere}
+.finding-impact .impact-note{color:var(--muted);margin:8px 0 0}

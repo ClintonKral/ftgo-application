@@ -13,7 +13,7 @@ const api=(qs.get('api')||'').replace(/\/+$/,'');
 let dataPath=qs.get('data')||'';
 const {ANALYSIS,REVIEW}=walkthroughPipeline;
 const initialView=qs.get('view')==='checks'?'checks':'review';
-const state={desc:walkthroughPipeline.isDescriptionRoute(qs),status:null,packet:null,packetDigest:null,summary:null,model:null,view:initialView,selected:initialView==='review'?(qs.get('item')||null):null,tab:'obj',node:null,full:false,evidenceFile:'',methods:{},drafts:new Map(),saves:new Map(),reviewScope:null,commentBody:'',commentChecked:0,error:'',loadingArtifact:false};
+const state={desc:walkthroughPipeline.isDescriptionRoute(qs),status:null,packet:null,packetDigest:null,summary:null,model:null,view:initialView,selected:initialView==='review'?(qs.get('item')||null):null,tab:'obj',node:null,full:false,evidenceFile:'',methods:{},drafts:new Map(),reasons:new Map(),saves:new Map(),reviewScope:null,commentBody:'',commentChecked:0,error:'',loadingArtifact:false};
 let pollTimer=null;
 let assessmentResize=null;
 let returnCommentId=/^[0-9]+$/.test(qs.get('comment')||'')?qs.get('comment'):null;
@@ -260,7 +260,7 @@ function typeIcon(value){
 }
 function row(item,kind){
  const answer=decision(item.id),submitted=confirmed(item);
- const status=item.status==='unknown'?'LACKS_DETERMINISTIC_EVIDENCE':answer==='yes'?(submitted?'Intended · recorded':'Yes, I meant this'):answer==='no'?(submitted?'Unresolved · recorded':'No, investigate'):'';
+ const status=item.status==='unknown'?'LACKS_DETERMINISTIC_EVIDENCE':answer==='yes'?(submitted?'Intended · recorded':'Yes, I meant this'):answer==='no'?(submitted?'Reported incorrect · sent to Holonic':'No, finding is incorrect'):'';
  const type=String(item.reviewType||'Behavior');
  return `<button type="button" class="row ${answer||''} ${submitted?'submitted':''}" data-row="${esc(item.id)}"><span class="t"><b>${esc(item.title||item.summary)}</b>${item.summary?`<span class="row-summary">${esc(item.summary)}</span>`:''}<small class="meta">${esc(item.concept||item.file||item.groundingLabel||'Recorded review evidence')}${item.objective?' · accepted constraint':''}</small></span><span class="row-side">${typeIcon(type)}${status?`<span class="st">${esc(status)}</span>`:''}</span></button>`;
 }
@@ -291,29 +291,90 @@ function listScreen(){
  const sections=[section('change','Did you intend these behavioral changes?'),section('constraint','Did you mean to change these constraints?')].filter(Boolean);
  return `<div class="ci findings-review section-count-${sections.length}"><div class="findings-sections">${sections.join('')}</div>${acceptanceNotice()}${summaryNotice()}</div>`;
 }
+// The first changed line on each side of the recorded excerpt, from its patch hunk header.
+function changedLines(comparison){
+ let base=null,head=null,found=null;
+ for(const [mark,text] of comparison?.diffLines||[]){
+  const hunk=String(text).match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+  if(hunk){if(found)break;base=Number(hunk[1]);head=Number(hunk[2]);continue;}
+  if(base===null)continue;
+  if(mark==='-'){found=found||{base:null,head:null};found.base??=base;base++;}
+  else if(mark==='+'){found=found||{base:null,head:null};found.head??=head;head++;}
+  else{if(found&&found.base!==null&&found.head!==null)break;base++;head++;}
+ }
+ return found;
+}
+function blobUrl(commit,file,line){
+ const parts=repo.split('/');
+ if(parts.length!==2||!/^[0-9a-f]{40}$/.test(commit||'')||!file)return '';
+ return `https://github.com/${parts.map(encodeURIComponent).join('/')}/blob/${commit}/${String(file).split('/').map(encodeURIComponent).join('/')}${line?'#L'+line:''}`;
+}
+function sourceLinks(item){
+ if(!item.file)return '';
+ const lines=changedLines(item.comparison)||{},recorded=Number(item.line)||null;
+ const added=item.comparison?.before?.text==='(file did not exist in the accepted baseline)';
+ const head=blobUrl(sha,item.file,recorded||lines.head),base=added?'':blobUrl(state.packet?.baseline_commit,item.file,lines.base||(!recorded&&lines.head)||null);
+ const files=pullRequestUrl()!=='#'?pullRequestUrl()+'/files':'';
+ const link=(url,text)=>url?`<a href="${esc(url)}" target="_blank" rel="noopener">${esc(text)}</a>`:'';
+ const at=line=>line?` line ${line}`:'';
+ const links=[link(head,'This PR'+at(recorded||lines.head)),link(base,'Baseline'+at(lines.base)),link(files,'All changed files')].filter(Boolean);
+ return links.length?`<div class="source-links"><small>SOURCE</small><code title="${esc(item.file)}">${esc(item.file)}</code><span>${links.join(' · ')}</span></div>`:'';
+}
+// What a person configured, what the analysis derived from code, and what is model wording.
+function findingOrigins(item){
+ const finding=(item.findings||[])[0],authority=state.status?.governance_baseline?.authority||{};
+ const shortRef=value=>String(value||'').replace(/^gov:/,'').slice(0,12);
+ const release=authority.ledger_release?` release ${shortRef(authority.ledger_release)}`:'';
+ let people;
+ if(item.objective)people=`The accepted constraint above was written and accepted by people in the governance ledger${release}. It is not inferred from this code.`;
+ else if(finding?.kind==='standard')people=`Rule ${finding.rule_id} was written and approved by people in this repository's coding standards${finding.basis?` (${finding.basis})`:''}.`;
+ else if(finding?.kind==='test')people='None. The test-quality check is a built-in CodeIntent check, not a rule someone configured for this repository.';
+ else people='None. No accepted objective covers this change, so the question is only whether you intended it.';
+ const base=String(state.packet?.baseline_commit||'').slice(0,12),head=sha.slice(0,12);
+ const code=[];
+ if(item.intentBefore?.length||item.intentAfter?.length)code.push(`The intent facts were extracted by deterministic analysis of the baseline (${base||'unknown'}) and this PR (${head}).`);
+ if(item.comparison?.before?.text!=null)code.push(`The code excerpt is ${item.comparison.scope==='method'?'the changed hunks of the recorded method':'taken'} from the digest-verified PR patch.`);
+ if(finding)code.push(`The finding itself is the recorded result of the ${finding.kind==='test'?'test-quality':'coding-standards'} check on this commit.`);
+ if(item.connections?.length)code.push('The connected outcomes come from the accepted workflow map, matched to the methods this PR changed.');
+ const model=/AGENT INTERPRETATION/.test(item.groundingLabel||'')?'The summary sentences are written by a model from the recorded facts. They can be wrong; check them against the code.':'None. Every statement here is projected from recorded analysis.';
+ return `<details class="provenance" open><summary>Where this comes from</summary><dl><dt>Set by people</dt><dd>${esc(people)}</dd><dt>Derived from code</dt><dd>${esc(code.join(' ')||'No code-derived facts were recorded for this item.')}</dd><dt>Model wording</dt><dd>${esc(model)}</dd></dl></details>`;
+}
+// The reason a No carries: what the reviewer typed in this session, else the reason already saved
+// with the recorded No, so resubmitting without editing keeps it.
+function currentReason(review){
+ if(!review)return '';
+ return state.reasons.get(review.scope)??(review.decision==='unresolved'?review.reason||'':'');
+}
 function detailScreen(item){
  const answer=decision(item.id),intent=diffLines(intentLines(item.intentBefore),intentLines(item.intentAfter));
  const connections=item.connections?.length?`<div class="holon"><b>Connected governed outcomes</b><ul>${item.connections.map(connection=>`<li><b>${esc(connection.title)}</b> · ${esc(connection.detail)}</li>`).join('')}</ul></div>`:'';
  const resolution=item.resolution?`<div class="rule"><small>HOW TO RESOLVE IT</small><p>${esc(item.resolution)}</p></div>`:'';
  const interpretation=`<div class="summary"><small>${esc(item.groundingLabel||'RECORDED PIPELINE EVIDENCE')}</small><p>${esc(item.detailSummary||item.summary)}</p></div>`;
  const question='Was this an intended change?';
- const yes='Yes',no='No';
+ const yes='Yes, I meant this',no='No, this finding is incorrect';
  const target=reviewTarget(item),targets=reviewTargets(item);
  const save=state.saves.get(target?.finding.review.scope);
+ const review=target?.finding.review,reason=currentReason(review);
+ // A No reports the finding as incorrect; the optional reason travels with it to Holonic's review queue.
+ const reasonBox=answer==='no'&&review?`<label class="incorrect-reason"><span>Why is this finding incorrect? <small>Optional · sent to Holonic for review with the pinned evidence</small></span><textarea data-review-reason maxlength="500" rows="2" placeholder="For example: renamed only, behavior is unchanged" ${save?.busy?'disabled':''}>${esc(reason)}</textarea></label>`:'';
+ const reported=review?.disposition==='finding_incorrect'&&review.decision==='unresolved'?`<div class="rule incorrect-reported"><small>REPORTED AS INCORRECT · SENT TO HOLONIC</small><p>${esc(review.reason||'No reason was given.')}${review.actor?` · ${esc(review.actor)}`:''}</p></div>`:'';
  const selector=targets.length>1?`<label>Finding <select data-review-scope><option value="">Choose a finding</option>${targets.map(t=>`<option value="${esc(t.finding.review.scope)}" ${target===t||target?.finding.review.scope===t.finding.review.scope?'selected':''}>${esc(t.finding.title||t.finding.name||t.finding.id||t.finding.ref)}</option>`).join('')}</select></label>`:'';
 
  return `<div class="ci desc-page"><article class="tile">
   <div class="tile-head"><h3>${esc(item.title)}</h3>${typeIcon(item.reviewType||'Behavior')}</div>
   <div class="tile-sub"><code>${esc(item.method||short(item.file))}</code></div>
-  ${item.objective?`<div class="rule"><small>ACCEPTED CONSTRAINT</small><p>${esc(item.objective)}</p></div>`:''}
+  ${item.objective?`<div class="rule"><small>ACCEPTED CONSTRAINT</small><p>${esc(item.objective)}</p></div>`:item.findings?.[0]?.kind==='standard'?`<div class="rule"><small>REPOSITORY RULE · ${esc(item.findings[0].rule_id)}</small><p>${esc(item.findings[0].title)}${item.findings[0].summary?`. ${esc(item.findings[0].summary)}`:''}</p></div>`:''}
+  ${sourceLinks(item)}
   <div class="ba"><div><small>BEFORE</small>${esc(item.before)}</div><div class="after"><small>WITH THIS PR</small>${esc(item.after)}</div></div>
   ${interpretation}
+  ${findingOrigins(item)}
   <div class="diffs">
    <section class="pane"><header><b>Intent</b><span>${esc(label(item.concept))}</span></header>${intent.length?`<pre>${lines(intent)}</pre>`:'<p class="evidence-empty">No intent comparison recorded for this item.</p>'}</section>
    <section class="pane"><header><b>Code</b><span>${esc(short(item.file))}</span></header>${item.comparison?.before?.text!=null&&item.comparison?.after?.text!=null?`<pre>${lines(sourceLines(item))}</pre>${item.comparison.complete?'':`<p class="evidence-empty">${esc(item.comparison.qualification||'Recorded source excerpt; open more evidence for context.')}</p>`}`:`<p class="evidence-empty">${esc(item.comparison?.reason||'No source comparison recorded for this item. Check the source evidence view for available patches.')}</p>`}</section>
   </div>
-  ${item.status==='unknown'?'<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>LACKS_DETERMINISTIC_EVIDENCE. Review the analysis gap; assessments are unavailable.</b></div>':item.status==='watch'?'<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>This is informational; no response is required.</b></div>':`<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>${esc(question)}</b>${selector}<button type="button" class="choice yes" data-act="yes" ${target&&!save?.busy?'':'disabled'} aria-pressed="${answer==='yes'}">${esc(yes)}</button><button type="button" class="choice no" data-act="no" ${target&&!save?.busy?'':'disabled'} aria-pressed="${answer==='no'}">${esc(no)}</button><button type="button" class="choice return-github" data-act="return-github" ${answer&&target&&!save?.busy&&returnToCommentUrl()?'':'disabled'} aria-busy="${!!save?.busy}"><span class="return-spinner" aria-hidden="true"><img src="assets/checks-running.gif" width="18" height="18" alt=""></span><span>Return to Github</span></button></div>`}
-  <section class="compact-evidence" aria-labelledby="recorded-evidence-heading"><h4 id="recorded-evidence-heading">Recorded evidence</h4><div id="recorded-evidence">${resolution}${connections}${reviewExplorer.pane(item,state.packet,state.summary,checks(),{tab:state.tab,node:state.node,full:state.full,file:state.evidenceFile,methods:state.methods})}</div></section>
+  ${codeIntentFindingImpact.findingImpactMarkup(item,state.packet)}
+  ${item.status==='unknown'?'<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>LACKS_DETERMINISTIC_EVIDENCE. Review the analysis gap; assessments are unavailable.</b></div>':item.status==='watch'?'<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>This is informational; no response is required.</b></div>':`<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>${esc(question)}</b>${selector}<button type="button" class="choice yes" data-act="yes" ${target&&!save?.busy?'':'disabled'} aria-pressed="${answer==='yes'}">${esc(yes)}</button><button type="button" class="choice no" data-act="no" ${target&&!save?.busy?'':'disabled'} aria-pressed="${answer==='no'}">${esc(no)}</button>${reasonBox}<button type="button" class="choice return-github" data-act="return-github" ${answer&&target&&!save?.busy&&returnToCommentUrl()?'':'disabled'} aria-busy="${!!save?.busy}"><span class="return-spinner" aria-hidden="true"><img src="assets/checks-running.gif" width="18" height="18" alt=""></span><span>Return to Github</span></button></div>`}
+  ${reported}<section class="compact-evidence" aria-labelledby="recorded-evidence-heading"><h4 id="recorded-evidence-heading">Recorded evidence</h4><div id="recorded-evidence">${resolution}${connections}${reviewExplorer.pane(item,state.packet,state.summary,checks(),{tab:state.tab,node:state.node,full:state.full,file:state.evidenceFile,methods:state.methods})}</div></section>
  </article></div>`;
 }
 function acceptanceNotice(){
@@ -332,6 +393,8 @@ function restoreReviewScroll(saved){
 }
 function render(options={}){
  const saved=options.preserveScroll?reviewScroll():null;
+ // Polling re-renders the page; keep a reviewer's half-typed reason and caret in place.
+ const typing=document.activeElement?.matches?.('[data-review-reason]')?{start:document.activeElement.selectionStart,end:document.activeElement.selectionEnd}:null;
  runContext.textContent=repo+(pr?' · Pull request #'+pr:'');
  const prUrl=pullRequestUrl();prBack.href=prUrl;prBack.hidden=prUrl==='#';
  document.title=`CodeIntent · ${repo||'review'}${pr?' #'+pr:''}`;
@@ -362,6 +425,8 @@ function render(options={}){
  }
  legacyMethodExplorer.hydrate();
  if(saved)restoreReviewScroll(saved);
+ const reasonField=typing&&screen.querySelector('[data-review-reason]');
+ if(reasonField){reasonField.focus();reasonField.setSelectionRange(typing.start,typing.end);}
 }
 
 // Yes accepts a finding, so it is saved under the reviewer's GitHub identity and
@@ -397,6 +462,11 @@ document.addEventListener('click',async event=>{
  if(target.dataset.exTab){state.tab=target.dataset.exTab;render();document.querySelector('#rx-tab-'+state.tab)?.focus();return;}
  if(target.dataset.node){state.node=target.dataset.node;render();return;}
  if(action==='graph-full'){state.full=!state.full;state.node=null;render();return;}
+ // A method in a finding's impact list opens the impact map with that method selected.
+ if(target.dataset.impactMethod){
+  state.tab='obj';state.methods.governedMethod=target.dataset.impactMethod;state.methods.governedHolon=null;render();
+  document.querySelector('.legacy-method-explorer')?.scrollIntoView({behavior:'smooth',block:'start'});return;
+ }
 
  if(action==='open'){navigate('review');}
  else if(action==='checks'){event.preventDefault();navigate('checks');}
@@ -412,7 +482,8 @@ document.addEventListener('click',async event=>{
   if(!review||!destination||item.status==='unknown'||item.status==='watch')return;
   const scope=review.finding.review.scope,answer=decision(item.id),prior=state.saves.get(scope);
   if(!answer||prior?.busy)return;
-  const request=prior?.request&&prior.request.answer===answer?prior.request:{repository:repo,pull_request:Number(pr),head_sha:sha,scope,answer,expected_review:review.finding.review.record||null,request_id:crypto.randomUUID()};
+  const reason=answer==='no'?String(currentReason(review.finding.review)).trim():'';
+  const request=prior?.request&&prior.request.answer===answer&&(prior.request.reason||'')===reason?prior.request:{repository:repo,pull_request:Number(pr),head_sha:sha,scope,answer,expected_review:review.finding.review.record||null,request_id:crypto.randomUUID(),...(reason?{reason}:{})};
   state.saves.set(scope,{request,busy:true});render();
   if(answer==='yes'){await saveYes(request,destination);return;}
   try{
@@ -428,6 +499,11 @@ document.addEventListener('click',async event=>{
  }
 
 
+});
+document.addEventListener('input',event=>{
+ if(!event.target.matches('[data-review-reason]'))return;
+ const review=reviewTarget(items().find(i=>i.id===state.selected));
+ if(review)state.reasons.set(review.finding.review.scope,event.target.value);
 });
 document.addEventListener('change',event=>{
  if(event.target.matches('[data-review-scope]')){state.reviewScope=event.target.value;render();return;}
