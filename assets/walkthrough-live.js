@@ -13,7 +13,7 @@ const api=(qs.get('api')||'').replace(/\/+$/,'');
 let dataPath=qs.get('data')||'';
 const {ANALYSIS,REVIEW}=walkthroughPipeline;
 const initialView=qs.get('view')==='checks'?'checks':'review';
-const state={desc:walkthroughPipeline.isDescriptionRoute(qs),status:null,packet:null,packetDigest:null,summary:null,model:null,view:initialView,selected:initialView==='review'?(qs.get('item')||null):null,tab:'obj',node:null,full:false,evidenceFile:'',methods:{},drafts:new Map(),saves:new Map(),reviewScope:null,commentBody:'',commentChecked:0,error:'',loadingArtifact:false};
+const state={desc:walkthroughPipeline.isDescriptionRoute(qs),status:null,packet:null,packetDigest:null,summary:null,model:null,view:initialView,selected:initialView==='review'?(qs.get('item')||null):null,tab:'obj',node:null,full:false,evidenceFile:'',methods:{},drafts:new Map(),reasons:new Map(),saves:new Map(),reviewScope:null,commentBody:'',commentChecked:0,error:'',loadingArtifact:false};
 let pollTimer=null;
 let assessmentResize=null;
 let returnCommentId=/^[0-9]+$/.test(qs.get('comment')||'')?qs.get('comment'):null;
@@ -40,16 +40,18 @@ function confirmed(item){
  return codeIntentFindingReviews.recorded(target,state.commentBody)&&(!draft||draft===(target.finding.review.decision==='accepted'?'yes':'no'));
 }
 async function refreshReviewComment(){
- if(!returnCommentId||Date.now()-state.commentChecked<30000)return;
+ if(!returnCommentId||Date.now()-state.commentChecked<30000)return false;
  const pending=checks().some(check=>(check.findings||[]).some(finding=>finding.review?.record&&!codeIntentFindingReviews.recorded({finding},state.commentBody)));
- if(!pending)return;
+ if(!pending)return false;
  state.commentChecked=Date.now();
  try{
   const response=await fetch(`https://api.github.com/repos/${repo.split('/').map(encodeURIComponent).join('/')}/issues/comments/${returnCommentId}`,{cache:'no-store'});
-  if(!response.ok)return;
+  if(!response.ok)return false;
   const comment=await response.json();
-  state.commentBody=comment.user?.login==='github-actions[bot]'?comment.body||'':'';
- }catch(error){/* Keep the recorded decision; do not claim the comment was refreshed. */}
+  const body=comment.user?.login==='github-actions[bot]'?comment.body||'':'';
+  if(body===state.commentBody)return false;
+  state.commentBody=body;return true;
+ }catch(error){return false;/* Keep the recorded decision; do not claim the comment was refreshed. */}
 }
 function pullRequestUrl(){
  const parts=repo.split('/');
@@ -110,7 +112,7 @@ async function loadText(reference,maxBytes,digest){
  return new TextDecoder().decode(bytes);
 }
 async function loadArtifacts(){
- if(state.loadingArtifact||state.packet||!dataPath)return;
+ if(state.loadingArtifact||state.packet||!dataPath)return false;
  state.loadingArtifact=true;
  try{
   const reference=state.status?.review_artifact;
@@ -166,23 +168,29 @@ async function loadArtifacts(){
   }
   const model=reviewExplorer.enrich(codeIntentReviewModel(packet,loadedSummary||{},[],checks()),packet,loadedSummary,checks());
   state.packet=packet;state.packetDigest=digest||null;state.summary=loadedSummary;state.model=model;
- }catch(error){state.error='Review evidence unavailable: '+error.message;}
- finally{state.loadingArtifact=false;render();}
+  return true;
+ }catch(error){state.error='Review evidence unavailable: '+error.message;return true;}
+ finally{state.loadingArtifact=false;}
 }
 async function poll(){
+ let changed=false;
  try{
   if(!api||!repo||!sha)throw Error('This link is missing api, repo, or sha.');
   const response=await fetch(statusUrl(),{cache:'no-store'});if(!response.ok)throw Error('Status returned HTTP '+response.status+'.');
-  state.status=await response.json();state.error='';
+  const nextStatus=await response.json();
+  changed=JSON.stringify(nextStatus)!==JSON.stringify(state.status)||!!state.error;
+  state.status=nextStatus;state.error='';
   const reference=state.status?.review_artifact;
   if(!dataPath&&reference?.schema==='review-artifact-reference-v1'&&reference.name==='intent-flow.json'){
    const artifact=new URL(statusUrl());artifact.searchParams.set('detail','review-artifact');artifact.searchParams.set('name',reference.name);dataPath=artifact.href;
   }
   if(state.packet&&reference?.sha256&&reference.sha256!==state.packetDigest){state.packet=null;state.summary=null;state.model=null;}
-  if(state.packet){state.packet.explorer.results={checks:checks()};state.model=reviewExplorer.enrich(codeIntentReviewModel(state.packet,state.summary||{},[],checks()),state.packet,state.summary,checks());}
-  else await loadArtifacts();
- }catch(error){state.error='Live pipeline unavailable: '+error.message;}
- await refreshReviewComment();render();
+  if(state.packet){
+   if(changed){state.packet.explorer.results={checks:checks()};state.model=reviewExplorer.enrich(codeIntentReviewModel(state.packet,state.summary||{},[],checks()),state.packet,state.summary,checks());}
+  }else changed=await loadArtifacts()||changed;
+ }catch(error){const message='Live pipeline unavailable: '+error.message;changed=message!==state.error;state.error=message;}
+ const commentChanged=await refreshReviewComment();
+ if(changed||commentChanged)render({preserveScroll:true});
  pollTimer=setTimeout(poll,state.status?.state==='completed'?15000:1500);
 }
 
@@ -252,7 +260,7 @@ function typeIcon(value){
 }
 function row(item,kind){
  const answer=decision(item.id),submitted=confirmed(item);
- const status=item.status==='unknown'?'LACKS_DETERMINISTIC_EVIDENCE':answer==='yes'?(submitted?'Intended · recorded':'Yes, I meant this'):answer==='no'?(submitted?'Unresolved · recorded':'No, investigate'):'';
+ const status=item.status==='unknown'?'LACKS_DETERMINISTIC_EVIDENCE':answer==='yes'?(submitted?'Intended · recorded':'Yes, I meant this'):answer==='no'?(submitted?'Reported incorrect · sent to Holonic':'No, finding is incorrect'):'';
  const type=String(item.reviewType||'Behavior');
  return `<button type="button" class="row ${answer||''} ${submitted?'submitted':''}" data-row="${esc(item.id)}"><span class="t"><b>${esc(item.title||item.summary)}</b>${item.summary?`<span class="row-summary">${esc(item.summary)}</span>`:''}<small class="meta">${esc(item.concept||item.file||item.groundingLabel||'Recorded review evidence')}${item.objective?' · accepted constraint':''}</small></span><span class="row-side">${typeIcon(type)}${status?`<span class="st">${esc(status)}</span>`:''}</span></button>`;
 }
@@ -283,29 +291,90 @@ function listScreen(){
  const sections=[section('change','Did you intend these behavioral changes?'),section('constraint','Did you mean to change these constraints?')].filter(Boolean);
  return `<div class="ci findings-review section-count-${sections.length}"><div class="findings-sections">${sections.join('')}</div>${acceptanceNotice()}${summaryNotice()}</div>`;
 }
+// The first changed line on each side of the recorded excerpt, from its patch hunk header.
+function changedLines(comparison){
+ let base=null,head=null,found=null;
+ for(const [mark,text] of comparison?.diffLines||[]){
+  const hunk=String(text).match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+  if(hunk){if(found)break;base=Number(hunk[1]);head=Number(hunk[2]);continue;}
+  if(base===null)continue;
+  if(mark==='-'){found=found||{base:null,head:null};found.base??=base;base++;}
+  else if(mark==='+'){found=found||{base:null,head:null};found.head??=head;head++;}
+  else{if(found&&found.base!==null&&found.head!==null)break;base++;head++;}
+ }
+ return found;
+}
+function blobUrl(commit,file,line){
+ const parts=repo.split('/');
+ if(parts.length!==2||!/^[0-9a-f]{40}$/.test(commit||'')||!file)return '';
+ return `https://github.com/${parts.map(encodeURIComponent).join('/')}/blob/${commit}/${String(file).split('/').map(encodeURIComponent).join('/')}${line?'#L'+line:''}`;
+}
+function sourceLinks(item){
+ if(!item.file)return '';
+ const lines=changedLines(item.comparison)||{},recorded=Number(item.line)||null;
+ const added=item.comparison?.before?.text==='(file did not exist in the accepted baseline)';
+ const head=blobUrl(sha,item.file,recorded||lines.head),base=added?'':blobUrl(state.packet?.baseline_commit,item.file,lines.base||(!recorded&&lines.head)||null);
+ const files=pullRequestUrl()!=='#'?pullRequestUrl()+'/files':'';
+ const link=(url,text)=>url?`<a href="${esc(url)}" target="_blank" rel="noopener">${esc(text)}</a>`:'';
+ const at=line=>line?` line ${line}`:'';
+ const links=[link(head,'This PR'+at(recorded||lines.head)),link(base,'Baseline'+at(lines.base)),link(files,'All changed files')].filter(Boolean);
+ return links.length?`<div class="source-links"><small>SOURCE</small><code title="${esc(item.file)}">${esc(item.file)}</code><span>${links.join(' · ')}</span></div>`:'';
+}
+// What a person configured, what the analysis derived from code, and what is model wording.
+function findingOrigins(item){
+ const finding=(item.findings||[])[0],authority=state.status?.governance_baseline?.authority||{};
+ const shortRef=value=>String(value||'').replace(/^gov:/,'').slice(0,12);
+ const release=authority.ledger_release?` release ${shortRef(authority.ledger_release)}`:'';
+ let people;
+ if(item.objective)people=`The accepted constraint above was written and accepted by people in the governance ledger${release}. It is not inferred from this code.`;
+ else if(finding?.kind==='standard')people=`Rule ${finding.rule_id} was written and approved by people in this repository's coding standards${finding.basis?` (${finding.basis})`:''}.`;
+ else if(finding?.kind==='test')people='None. The test-quality check is a built-in CodeIntent check, not a rule someone configured for this repository.';
+ else people='None. No accepted objective covers this change, so the question is only whether you intended it.';
+ const base=String(state.packet?.baseline_commit||'').slice(0,12),head=sha.slice(0,12);
+ const code=[];
+ if(item.intentBefore?.length||item.intentAfter?.length)code.push(`The intent facts were extracted by deterministic analysis of the baseline (${base||'unknown'}) and this PR (${head}).`);
+ if(item.comparison?.before?.text!=null)code.push(`The code excerpt is ${item.comparison.scope==='method'?'the changed hunks of the recorded method':'taken'} from the digest-verified PR patch.`);
+ if(finding)code.push(`The finding itself is the recorded result of the ${finding.kind==='test'?'test-quality':'coding-standards'} check on this commit.`);
+ if(item.connections?.length)code.push('The connected outcomes come from the accepted workflow map, matched to the methods this PR changed.');
+ const model=/AGENT INTERPRETATION/.test(item.groundingLabel||'')?'The summary sentences are written by a model from the recorded facts. They can be wrong; check them against the code.':'None. Every statement here is projected from recorded analysis.';
+ return `<details class="provenance" open><summary>Where this comes from</summary><dl><dt>Set by people</dt><dd>${esc(people)}</dd><dt>Derived from code</dt><dd>${esc(code.join(' ')||'No code-derived facts were recorded for this item.')}</dd><dt>Model wording</dt><dd>${esc(model)}</dd></dl></details>`;
+}
+// The reason a No carries: what the reviewer typed in this session, else the reason already saved
+// with the recorded No, so resubmitting without editing keeps it.
+function currentReason(review){
+ if(!review)return '';
+ return state.reasons.get(review.scope)??(review.decision==='unresolved'?review.reason||'':'');
+}
 function detailScreen(item){
  const answer=decision(item.id),intent=diffLines(intentLines(item.intentBefore),intentLines(item.intentAfter));
  const connections=item.connections?.length?`<div class="holon"><b>Connected governed outcomes</b><ul>${item.connections.map(connection=>`<li><b>${esc(connection.title)}</b> · ${esc(connection.detail)}</li>`).join('')}</ul></div>`:'';
  const resolution=item.resolution?`<div class="rule"><small>HOW TO RESOLVE IT</small><p>${esc(item.resolution)}</p></div>`:'';
  const interpretation=`<div class="summary"><small>${esc(item.groundingLabel||'RECORDED PIPELINE EVIDENCE')}</small><p>${esc(item.detailSummary||item.summary)}</p></div>`;
  const question='Was this an intended change?';
- const yes='Yes',no='No';
+ const yes='Yes, I meant this',no='No, this finding is incorrect';
  const target=reviewTarget(item),targets=reviewTargets(item);
  const save=state.saves.get(target?.finding.review.scope);
+ const review=target?.finding.review,reason=currentReason(review);
+ // A No reports the finding as incorrect; the optional reason travels with it to Holonic's review queue.
+ const reasonBox=answer==='no'&&review?`<label class="incorrect-reason"><span>Why is this finding incorrect? <small>Optional · sent to Holonic for review with the pinned evidence</small></span><textarea data-review-reason maxlength="500" rows="2" placeholder="For example: renamed only, behavior is unchanged" ${save?.busy?'disabled':''}>${esc(reason)}</textarea></label>`:'';
+ const reported=review?.disposition==='finding_incorrect'&&review.decision==='unresolved'?`<div class="rule incorrect-reported"><small>REPORTED AS INCORRECT · SENT TO HOLONIC</small><p>${esc(review.reason||'No reason was given.')}${review.actor?` · ${esc(review.actor)}`:''}</p></div>`:'';
  const selector=targets.length>1?`<label>Finding <select data-review-scope><option value="">Choose a finding</option>${targets.map(t=>`<option value="${esc(t.finding.review.scope)}" ${target===t||target?.finding.review.scope===t.finding.review.scope?'selected':''}>${esc(t.finding.title||t.finding.name||t.finding.id||t.finding.ref)}</option>`).join('')}</select></label>`:'';
 
  return `<div class="ci desc-page"><article class="tile">
   <div class="tile-head"><h3>${esc(item.title)}</h3>${typeIcon(item.reviewType||'Behavior')}</div>
   <div class="tile-sub"><code>${esc(item.method||short(item.file))}</code></div>
-  ${item.objective?`<div class="rule"><small>ACCEPTED CONSTRAINT</small><p>${esc(item.objective)}</p></div>`:''}
+  ${item.objective?`<div class="rule"><small>ACCEPTED CONSTRAINT</small><p>${esc(item.objective)}</p></div>`:item.findings?.[0]?.kind==='standard'?`<div class="rule"><small>REPOSITORY RULE · ${esc(item.findings[0].rule_id)}</small><p>${esc(item.findings[0].title)}${item.findings[0].summary?`. ${esc(item.findings[0].summary)}`:''}</p></div>`:''}
+  ${sourceLinks(item)}
   <div class="ba"><div><small>BEFORE</small>${esc(item.before)}</div><div class="after"><small>WITH THIS PR</small>${esc(item.after)}</div></div>
   ${interpretation}
+  ${findingOrigins(item)}
   <div class="diffs">
    <section class="pane"><header><b>Intent</b><span>${esc(label(item.concept))}</span></header>${intent.length?`<pre>${lines(intent)}</pre>`:'<p class="evidence-empty">No intent comparison recorded for this item.</p>'}</section>
    <section class="pane"><header><b>Code</b><span>${esc(short(item.file))}</span></header>${item.comparison?.before?.text!=null&&item.comparison?.after?.text!=null?`<pre>${lines(sourceLines(item))}</pre>${item.comparison.complete?'':`<p class="evidence-empty">${esc(item.comparison.qualification||'Recorded source excerpt; open more evidence for context.')}</p>`}`:`<p class="evidence-empty">${esc(item.comparison?.reason||'No source comparison recorded for this item. Check the source evidence view for available patches.')}</p>`}</section>
   </div>
-  ${item.status==='unknown'?'<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>LACKS_DETERMINISTIC_EVIDENCE. Review the analysis gap; assessments are unavailable.</b></div>':item.status==='watch'?'<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>This is informational; no response is required.</b></div>':`<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>${esc(question)}</b>${selector}<button type="button" class="choice yes" data-act="yes" ${target&&!save?.busy?'':'disabled'} aria-pressed="${answer==='yes'}">${esc(yes)}</button><button type="button" class="choice no" data-act="no" ${target&&!save?.busy?'':'disabled'} aria-pressed="${answer==='no'}">${esc(no)}</button><button type="button" class="choice return-github" data-act="return-github" ${answer&&target&&!save?.busy&&returnToCommentUrl()?'':'disabled'} aria-busy="${!!save?.busy}"><span class="return-spinner" aria-hidden="true"><img src="assets/checks-running.gif" width="18" height="18" alt=""></span><span>Return to Github</span></button></div>`}
-  <section class="compact-evidence" aria-labelledby="recorded-evidence-heading"><h4 id="recorded-evidence-heading">Recorded evidence</h4><div id="recorded-evidence">${resolution}${connections}${reviewExplorer.pane(item,state.packet,state.summary,checks(),{tab:state.tab,node:state.node,full:state.full,file:state.evidenceFile,methods:state.methods})}</div></section>
+  ${codeIntentFindingImpact.findingImpactMarkup(item,state.packet)}
+  ${item.status==='unknown'?'<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>LACKS_DETERMINISTIC_EVIDENCE. Review the analysis gap; assessments are unavailable.</b></div>':item.status==='watch'?'<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>This is informational; no response is required.</b></div>':`<div class="ask desc-assessment" role="region" aria-label="Intent assessment"><b>${esc(question)}</b>${selector}<button type="button" class="choice yes" data-act="yes" ${target&&!save?.busy?'':'disabled'} aria-pressed="${answer==='yes'}">${esc(yes)}</button><button type="button" class="choice no" data-act="no" ${target&&!save?.busy?'':'disabled'} aria-pressed="${answer==='no'}">${esc(no)}</button>${reasonBox}<button type="button" class="choice return-github" data-act="return-github" ${answer&&target&&!save?.busy&&returnToCommentUrl()?'':'disabled'} aria-busy="${!!save?.busy}"><span class="return-spinner" aria-hidden="true"><img src="assets/checks-running.gif" width="18" height="18" alt=""></span><span>Return to Github</span></button></div>`}
+  ${reported}<section class="compact-evidence" aria-labelledby="recorded-evidence-heading"><h4 id="recorded-evidence-heading">Recorded evidence</h4><div id="recorded-evidence">${resolution}${connections}${reviewExplorer.pane(item,state.packet,state.summary,checks(),{tab:state.tab,node:state.node,full:state.full,file:state.evidenceFile,methods:state.methods})}</div></section>
  </article></div>`;
 }
 function acceptanceNotice(){
@@ -313,7 +382,19 @@ function acceptanceNotice(){
  if(a?.mode!=='enforce'||a.status==='ready')return '';
  return `<div class="notice"><b>Governance acceptance: ${esc(a.status||'unavailable')}</b><p>${esc(a.reason||'Acceptance is not ready.')}</p><p>This is separate from the source-analysis result.</p></div>`;
 }
-function render(){
+function reviewScroll(){
+ return {x:scrollX,y:scrollY,panes:[...screen.querySelectorAll('.pane pre')].map(node=>({top:node.scrollTop,left:node.scrollLeft}))};
+}
+function restoreReviewScroll(saved){
+ requestAnimationFrame(()=>{
+  scrollTo(saved.x,saved.y);
+  [...screen.querySelectorAll('.pane pre')].forEach((node,index)=>{const value=saved.panes[index];if(value){node.scrollTop=value.top;node.scrollLeft=value.left;}});
+ });
+}
+function render(options={}){
+ const saved=options.preserveScroll?reviewScroll():null;
+ // Polling re-renders the page; keep a reviewer's half-typed reason and caret in place.
+ const typing=document.activeElement?.matches?.('[data-review-reason]')?{start:document.activeElement.selectionStart,end:document.activeElement.selectionEnd}:null;
  runContext.textContent=repo+(pr?' · Pull request #'+pr:'');
  const prUrl=pullRequestUrl();prBack.href=prUrl;prBack.hidden=prUrl==='#';
  document.title=`CodeIntent · ${repo||'review'}${pr?' #'+pr:''}`;
@@ -322,10 +403,18 @@ function render(){
   const route=new URLSearchParams(location.search);
   const item=walkthroughPipeline.descriptionItem(items(),state.packet,state.summary,checks(),route.get('check'),route.get('issue'));
   if(item){state.selected=item.id;screen.innerHTML=detailScreen(item);}
+  else if(state.status?.llm_review)screen.innerHTML='<div class="notice"><h2>Automated verification is incomplete</h2><p>The advisory analysis below reports its source coverage separately. It does not satisfy the incomplete deterministic checks.</p></div>';
   else screen.innerHTML=`<div class="notice"><h2>${state.model?'Description unavailable':'Loading issue description…'}</h2><p>${state.model?'No matching description was recorded for this issue.':'Loading the pinned review evidence.'}</p>${state.model?checkExplanation():''}</div>`;
  }else if(state.view==='checks')screen.innerHTML=checksScreen();
  else if(state.selected){const item=items().find(value=>value.id===state.selected);screen.innerHTML=item?detailScreen(item):listScreen();}
  else screen.innerHTML=listScreen();
+ const sizeNotice=(state.status?.checks||[]).find(check=>check.id==='reviewability')?.reviewability;
+ if(sizeNotice&&sizeNotice.band!=='normal'){
+  screen.insertAdjacentHTML('beforeend',`<section class="notice reviewability-notice"><h2>PR reviewability</h2><p>${esc(sizeNotice.message)}</p><p>${esc(sizeNotice.analysis_lines)} counted lines across ${esc(sizeNotice.changed_files)} files · ${esc(sizeNotice.mode)} policy</p></section>`);
+ }
+ if(state.status?.llm_review){
+  screen.insertAdjacentHTML('beforeend',`<section class="llm-fallback-review">${llmErrorReview.render(state.status.llm_review)}</section>`);
+ }
  assessmentResize?.disconnect();
  const assessment=screen.querySelector('.desc-assessment');
  const desc=screen.querySelector('.desc-page');
@@ -335,8 +424,37 @@ function render(){
   assessmentResize=new ResizeObserver(reserve);assessmentResize.observe(assessment);reserve();
  }
  legacyMethodExplorer.hydrate();
+ if(saved)restoreReviewScroll(saved);
+ const reasonField=typing&&screen.querySelector('[data-review-reason]');
+ if(reasonField){reasonField.focus();reasonField.setSelectionRange(typing.start,typing.end);}
 }
 
+// Yes accepts a finding, so it is saved under the reviewer's GitHub identity and
+// waits for the server's receipt. The API says how to prove who is answering: a
+// GitHub sign-in bounce when that is configured (the page resumes this exact
+// request on return), or otherwise a /codeintent-review comment on the PR.
+async function saveYes(request,destination,signInAllowed=true){
+ const scope=request.scope,page=location.href.split('#')[0];
+ try{
+  const token=codeIntentFindingReviews.session();
+  await codeIntentFindingReviews.submit(token?{...request,session:token}:request);
+  location.assign(destination);
+ }catch(error){
+  if(error.signIn&&signInAllowed){codeIntentFindingReviews.forget();codeIntentFindingReviews.signIn({request,destination},page);return;}
+  if(error.confirm){await confirmOnGitHub(request,destination);return;}
+  state.saves.set(scope,{request:error.status===409?null:request,busy:false});render();
+  window.alert(error.signIn?'GitHub sign-in did not complete. Press Return to Github to try again.':error.message);
+ }
+}
+async function confirmOnGitHub(request,destination){
+ const line=codeIntentFindingReviews.command('yes',request.head_sha,request.scope);
+ const message='Confirm your Yes from your GitHub account: post this as a new comment on the pull request.';
+ let copied=false;
+ try{await navigator.clipboard.writeText(line);copied=true;}catch(error){}
+ if(copied)window.alert(message+' It is copied to your clipboard.');
+ else window.prompt(message,line);
+ location.assign(destination.split('#')[0]+'#new_comment_field');
+}
 document.addEventListener('click',async event=>{
  const target=event.target.closest('button,a,[data-row],[data-node],[data-method-id],[data-method-service],input');if(!target)return;
  if(target.closest('.legacy-method-explorer'))return;
@@ -344,6 +462,11 @@ document.addEventListener('click',async event=>{
  if(target.dataset.exTab){state.tab=target.dataset.exTab;render();document.querySelector('#rx-tab-'+state.tab)?.focus();return;}
  if(target.dataset.node){state.node=target.dataset.node;render();return;}
  if(action==='graph-full'){state.full=!state.full;state.node=null;render();return;}
+ // A method in a finding's impact list opens the impact map with that method selected.
+ if(target.dataset.impactMethod){
+  state.tab='obj';state.methods.governedMethod=target.dataset.impactMethod;state.methods.governedHolon=null;render();
+  document.querySelector('.legacy-method-explorer')?.scrollIntoView({behavior:'smooth',block:'start'});return;
+ }
 
  if(action==='open'){navigate('review');}
  else if(action==='checks'){event.preventDefault();navigate('checks');}
@@ -359,11 +482,15 @@ document.addEventListener('click',async event=>{
   if(!review||!destination||item.status==='unknown'||item.status==='watch')return;
   const scope=review.finding.review.scope,answer=decision(item.id),prior=state.saves.get(scope);
   if(!answer||prior?.busy)return;
-  const request=prior?.request&&prior.request.answer===answer?prior.request:{repository:repo,pull_request:Number(pr),head_sha:sha,scope,answer,expected_review:review.finding.review.record||null,request_id:crypto.randomUUID()};
+  const reason=answer==='no'?String(currentReason(review.finding.review)).trim():'';
+  const request=prior?.request&&prior.request.answer===answer&&(prior.request.reason||'')===reason?prior.request:{repository:repo,pull_request:Number(pr),head_sha:sha,scope,answer,expected_review:review.finding.review.record||null,request_id:crypto.randomUUID(),...(reason?{reason}:{})};
   state.saves.set(scope,{request,busy:true});render();
+  if(answer==='yes'){await saveYes(request,destination);return;}
   try{
-   codeIntentFindingReviews.queue(request);
-   await new Promise(resolve=>setTimeout(resolve,5000));
+   // No only keeps a finding open, so it stays one anonymous click; a signed-in reviewer is credited.
+   // Wait for the API's receipt, as Yes does, so a failed save is shown instead of silently lost.
+   const token=codeIntentFindingReviews.session();
+   await codeIntentFindingReviews.submit(token?{...request,session:token}:request);
    location.assign(destination);
   }catch(error){
    state.saves.set(scope,{request:error.status===409?null:request,busy:false});render();
@@ -372,6 +499,11 @@ document.addEventListener('click',async event=>{
  }
 
 
+});
+document.addEventListener('input',event=>{
+ if(!event.target.matches('[data-review-reason]'))return;
+ const review=reviewTarget(items().find(i=>i.id===state.selected));
+ if(review)state.reasons.set(review.finding.review.scope,event.target.value);
 });
 document.addEventListener('change',event=>{
  if(event.target.matches('[data-review-scope]')){state.reviewScope=event.target.value;render();return;}
@@ -400,5 +532,13 @@ function setTheme(value){
 }
 setTheme(localStorage.getItem('codeintent-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'));
 theme.addEventListener('click',()=>{const next=document.documentElement.dataset.theme==='dark'?'light':'dark';localStorage.setItem('codeintent-theme',next);setTheme(next);});
+const signedIn=codeIntentFindingReviews.finishSignIn();
+const resumed=signedIn?.pending?.request,resumeTo=signedIn?.pending?.destination;
+if(resumed)state.drafts.set(resumed.scope,'yes');
 render();poll();resolveReturnComment();
+if(signedIn?.error)setTimeout(()=>window.alert(signedIn.error),0);
+else if(resumed&&/^https:\/\/github\.com\//.test(resumeTo||'')&&resumed.repository===repo&&resumed.head_sha===sha){
+ state.saves.set(resumed.scope,{request:resumed,busy:true});render();
+ saveYes(resumed,resumeTo,false);
+}
 })();

@@ -138,7 +138,7 @@ function evidenceGap(flow){
 function modelFromEvidenceGaps(packet){
  return (packet?.flows||[]).filter(evidenceGap).map(flow=>({
   id:flow.id,kind:'change',status:'unknown',title:'LACKS_DETERMINISTIC_EVIDENCE',
-  concept:flow.boundary_id||flow.title,file:flow.source?.file||'',method:shortMethod(flow.method),
+  concept:flow.boundary_id||flow.title,file:flow.source?.file||'',method:shortMethod(flow.method),methodRef:flow.method||'',
   before:'Baseline behavior is not established by this comparison.',
   after:'A behavior change cannot be established from the available evidence.',
   summary:'Analysis has an evidence gap; this is not an established behavior change.',
@@ -159,7 +159,7 @@ function modelFromSemantics(packet,summary){
   return {
    id:row.change_id||`semantic-${index}`,kind:objective?'constraint':'change',status:explanationStatus(row,flow),
    title:row.title||words(row.concept)||'Behavior change',concept:row.concept||flow.title||'Changed behavior',
-   method:shortMethod(row.changed_source?.method||flow.method),file:row.changed_source?.file||flow.source?.file||'',owner:paths.map(path=>path.owner).find(Boolean)||'',objective,
+   method:shortMethod(row.changed_source?.method||flow.method),methodRef:row.changed_source?.method||flow.method||'',file:row.changed_source?.file||flow.source?.file||'',owner:paths.map(path=>path.owner).find(Boolean)||'',objective,
    before:addedFile?`The accepted baseline did not contain ${shortFile(row.changed_source?.file||flow.source?.file)}.`:row.behavior_before,
    after:row.behavior_after,
    summary:row.semantic_consequence,
@@ -183,7 +183,7 @@ function modelFromNarrative(summary,packet){
   const related=(story.change_ids||[]).map(id=>changes[id]).filter(Boolean);
   const change=related[0]||{},comparison=change.source_comparison||null;
   return {id:story.story_id||`narrative-${index}`,kind:'change',status:'review',
-   title:story.title||'Behavior change',concept:'Changed behavior',method:shortMethod(change.method),
+   title:story.title||'Behavior change',concept:'Changed behavior',method:shortMethod(change.method),methodRef:change.method||'',
    file:change.source?.file||comparison?.file||'',owner:'',objective:'',
    before:'The baseline method is shown in the recorded source comparison below.',
    after:narrative.summary||story.explanation,
@@ -196,7 +196,7 @@ function modelFromNarrative(summary,packet){
 function modelFromEntries(entries){
  return (entries||[]).filter(entry=>(entry.story||entry.governanceDecision||entry.category==='Intent differences')&&!/\/src\/(?:test|integration-test)\//.test(entry.source?.file||'')).map(entry=>({
   id:entry.id,kind:entry.governanceObjective?'constraint':'change',status:entry.status==='action'?'violation':entry.status==='clear'?'preserved':'review',
-  title:entry.title,concept:entry.concept||entry.category,method:entry.source?.symbol||'',file:entry.source?.file||'',owner:entry.owner||'',objective:entry.governanceObjective||'',
+  title:entry.title,concept:entry.concept||entry.category,method:entry.source?.symbol||'',methodRef:entry.source?.symbol||'',file:entry.source?.file||'',owner:entry.owner||'',objective:entry.governanceObjective||'',
   before:entry.beforeResult||entry.beforeState||entry.before||'Baseline behavior is recorded in the technical evidence.',
   after:entry.afterResult||entry.afterState||entry.after||'Revised behavior needs review.',summary:entry.summary||entry.nextStep||'',
   intentBefore:entry.story?.before||entry.before,intentAfter:entry.story?.after||entry.after,connections:[],comparison:null,
@@ -237,7 +237,7 @@ function modelFromGovernedFlows(packet,checks){
   const violated=judgment.status==='supported_boundary_violation'||judgment.choice==='violated';
   return {id,kind:objective?'constraint':'change',status:violated?'violation':'preserved',
    title:words(judgment.boundary_id||flow.title)||'Governed boundary change',
-   concept:judgment.boundary_id||flow.title||'Governed boundary',method:shortMethod(flow.method),file,owner:'',objective,
+   concept:judgment.boundary_id||flow.title||'Governed boundary',method:shortMethod(flow.method),methodRef:flow.method||'',file,owner:'',objective,
    before:'The accepted baseline recorded the governed boundary behavior shown below.',
    after:violated?'This pull request changes that governed boundary and the recorded judgment reports a violation.':'The recorded judgment reports that this pull request preserves the governed boundary.',
    summary:violated?'The deterministic boundary comparison and recorded judgment establish a governed semantic violation.':'The deterministic boundary comparison and recorded judgment establish preservation.',
@@ -293,8 +293,8 @@ function reviewFindingItems(packet,summary,items,checks,includeAdvisory=false){
   const plain=interpretation.summary||target?.summary||finding.title;
   const fallback=finding.kind==='test'?[finding.summary,finding.basis].filter(Boolean).join(' '):plain;
   projected.push({id:finding.id,kind:finding.kind==='standard'&&!finding.watchOnly?'constraint':'change',status:finding.watchOnly?'watch':'finding',title:finding.title,
-   concept:finding.kind==='test'?'Behavioral evidence':'Repository standard',method:finding.method,
-   file:finding.file,owner:'',objective:'',
+   concept:finding.kind==='test'?'Behavioral evidence':'Repository standard',method:finding.method,methodRef:target?.methodRef||finding.method||'',
+   file:finding.file,line:finding.line||'',owner:'',objective:'',
    before:target?.before||(finding.kind==='test'?'The baseline retained test evidence for the affected behavior.':'The baseline did not contain this reported rule conflict.'),
    after:target?.after||(finding.kind==='test'?finding.summary:`The pipeline reported this rule against ${finding.method||finding.file}.`),
    summary:interpretation.summary||target?.summary||fallback,
@@ -330,7 +330,7 @@ function ownerReviewItems(packet,summary,items,checks){
   const flow=flows.get(finding.id),file=finding.file||flow?.source?.file||'';
   result.push({id:finding.id,kind:'change',status:'review',title:finding.title,
    summary:finding.title,detailSummary:finding.observation||'',before:describe(flow,'before'),after:describe(flow,'after'),
-   concept:'Source behavior requiring intent review',method:shortMethod(finding.unit||flow?.method),file,
+   concept:'Source behavior requiring intent review',method:shortMethod(finding.unit||flow?.method),methodRef:finding.unit||flow?.method||'',file,
    objective:'',owner:'',reviewType:'Behavior',connections:[],
    intentBefore:flowFacts(flow,'before'),intentAfter:flowFacts(flow,'after'),comparison:scopedPatchComparison(packet,file,finding.unit||flow?.method,[flow]),
    groundingLabel:'RECORDED SOURCE CHANGE',qualification:'Intent review only; no accepted obligation or violation is inferred.'});
@@ -421,13 +421,13 @@ function comparisonMarkup(before,after,formatter){
 
 function codeText(comparison,side){return comparison?.[side]?.text||'Source comparison was not supplied for this intent change.';}
 function violationMarkup(item){
- // A rule violation is decided in a PR comment by one person with write access (codeintent-violations.yml).
+ // A rule violation is answered on its review page: a GitHub-verified Yes records its rule exception.
  const finding=(item.findings||[]).find(f=>f.ref&&!f.watchOnly);
  if(!finding)return '';
  const ref=escapeHtml(finding.ref);
  const body=finding.decision==='rule_change_requested'
-  ?'<p>Reported as a false detection: a rule exception is committed to this pull request, and the checks re-run.</p>'
-  :`<p>Someone with write access decides, in a PR comment:</p><ul><li><b>Real violation:</b> <code>/reject -- reason</code> closes this pull request.</li><li><b>False detection:</b> <code>/false-positive ${ref} -- reason</code> requests a fix to the rule.</li></ul>`;
+  ?'<p>Reported as a false detection: its rule exception applies to this pull request now, and to the repository once it merges.</p>'
+  :'<p>Someone with write access answers on this finding\'s review page:</p><ul><li><b>Yes, intended:</b> the rule allows it in this pull request now, and in the whole repository once this pull request merges.</li><li><b>No:</b> the finding stays open and this pull request stays blocked.</li></ul>';
  return `<section class="rr-violation"><small>RULE VIOLATION · ${ref}</small>${body}</section>`;
 }
 function detailMarkup(item,state){
