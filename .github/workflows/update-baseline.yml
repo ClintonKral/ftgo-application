@@ -23,7 +23,7 @@ jobs:
     steps:
       - name: Request and verify baseline publication
         env:
-          BASELINE_API_URL: https://usks4zwyp4.execute-api.us-east-1.amazonaws.com/prod/baseline-maintenance
+          BASELINE_API_URL: ${{ secrets.BASELINE_API_URL }}
           BASELINE_API_KEY: ${{ secrets.BASELINE_API_KEY }}
           REPOSITORY: ${{ github.repository }}
           TARGET_COMMIT: ${{ inputs.commit || github.sha }}

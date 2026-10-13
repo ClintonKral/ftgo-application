@@ -38,7 +38,7 @@ jobs:
       # No checkout: PR sources are fetched and parsed by the trusted backend.
       - name: Prepare or publish the exact semantic candidate
         env:
-          BASELINE_API_URL: https://usks4zwyp4.execute-api.us-east-1.amazonaws.com/prod/baseline-maintenance
+          BASELINE_API_URL: ${{ secrets.BASELINE_API_URL }}
           BASELINE_API_KEY: ${{ secrets.BASELINE_API_KEY }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
