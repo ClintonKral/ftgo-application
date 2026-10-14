@@ -38,7 +38,7 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       API_URL: https://qgd63ljozc.execute-api.us-east-1.amazonaws.com/demo/verify-checks-holonic
       STATUS_API_URL: ${{ vars.CODEINTENT_STATUS_API_URL || 'https://qgd63ljozc.execute-api.us-east-1.amazonaws.com/demo/status' }}
@@ -90,6 +90,25 @@ jobs:
             gh api --method POST "repos/$PR_FULL_REPO/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null || \
               echo "::warning::Could not create the live-status PR comment."
           fi
+
+      - name: Wait for the exact default-branch native baseline
+        run: |
+          python3 - <<'PYCODE'
+          import json, os, time, urllib.parse, urllib.request
+          query = urllib.parse.urlencode({'repository': os.environ['PR_FULL_REPO'], 'commit': os.environ['PR_BASE_SHA']})
+          request = urllib.request.Request(os.environ['API_URL'] + '?' + query,
+                                          headers={'x-api-key': os.environ['API_KEY']})
+          for attempt in range(96):
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  record = json.load(response)
+              if record.get('state') == 'ready' and record.get('commit') == os.environ['PR_BASE_SHA']:
+                  print('Using published native baseline ' + record['commit'])
+                  break
+              print('Waiting for default-branch native baseline; PR analysis does not rebuild it.', flush=True)
+              time.sleep(10)
+          else:
+              raise SystemExit('The default-branch native baseline is not ready. Check the Update native baseline workflow.')
+          PYCODE
 
       - name: Start dependency-aware checks
         run: |
