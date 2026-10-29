@@ -1,0 +1,62 @@
+name: Holonic governance review
+
+# Repository-neutral PR-review workflow installed by the Holonic onboarding service.
+# Every repo-/endpoint-specific value is a {{PLACEHOLDER}} substituted at install time
+# (see templates/README.md).
+#
+# Security model (mirrors the FTGO forks):
+#   * TRUSTED base-branch workflow. `pull_request_target` runs it in the BASE repository's
+#     context on the default-branch copy of this file, so an untrusted PR branch cannot read
+#     `secrets.HOLONIC_API_KEY` or change the rules by editing the workflow on its branch.
+#   * It NEVER checks out or executes PR code -- it only reads the PR's textual diff via the
+#     GitHub API and forwards it to the Holonic review endpoint.
+#   * The governance rules live in the Holonic Lambda image, not in this repository.
+#   * The review endpoint validates HOLONIC_API_KEY, resolves the tenant, and reviews the
+#     change against that tenant's baseline.
+
+on:
+  pull_request_target:
+    branches: ["master"]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+jobs:
+  review:
+    if: github.repository == 'clintonkral/ftgo-application'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Holonic governance review
+        env:
+          API_KEY: ${{ secrets.HOLONIC_API_KEY }}
+          VERIFY_URL: "https://se5kckxtvj.execute-api.us-east-1.amazonaws.com/demo/verify-checks"
+          OWNER: ${{ github.event.repository.owner.login }}
+          REPO: ${{ github.event.repository.name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The PR's unified diff (read-only API; no PR code is checked out or executed).
+          DIFF=$(gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}" -H "Accept: application/vnd.github.v3.diff" || true)
+          jq -n \
+            --arg pn "${PR_NUMBER}" --arg title "${PR_TITLE}" --arg owner "${OWNER}" --arg repo "${REPO}" \
+            --arg sha "${HEAD_SHA}" --arg base "${BASE_SHA}" --arg diff "${DIFF}" --arg key "${API_KEY}" \
+            '{pull_request_number: ($pn|tonumber), pull_request_title: $title, owner: $owner, repo: $repo,
+              sha: $sha, base_sha: $base, diff: $diff, api_key: $key}' > /tmp/holonic-payload.json
+          CODE=$(curl -sS -m 840 -o /tmp/holonic-resp.json -w '%{http_code}' -X POST "${VERIFY_URL}" \
+                 -H 'Content-Type: application/json' --data-binary @/tmp/holonic-payload.json || echo 000)
+          echo "endpoint HTTP ${CODE}"; cat /tmp/holonic-resp.json || true; echo
+          VERDICT=$(jq -r '(.results[0].decision) // .error // "ERROR"' /tmp/holonic-resp.json 2>/dev/null || echo ERROR)
+          echo "verdict: ${VERDICT}"
+          STATE=failure; [ "${VERDICT}" = "PASS" ] && STATE=success
+          gh api --method POST "repos/${OWNER}/${REPO}/statuses/${HEAD_SHA}" \
+            -f state="${STATE}" -f context="Holonic / Governance review" -f description="${VERDICT}" >/dev/null || true
+          gh pr comment "${PR_NUMBER}" --repo "${OWNER}/${REPO}" \
+            --body "Holonic governance review: **${VERDICT}**" >/dev/null 2>&1 || true
+          [ "${STATE}" = "success" ]
