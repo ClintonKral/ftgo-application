@@ -1,6 +1,6 @@
 package net.chrisrichardson.ftgo.orderservice.main;
 
-// make a comment test
+// make a comment test now
 import io.eventuate.tram.spring.jdbckafka.TramJdbcKafkaConfiguration;
 import io.microservices.canvas.extractor.spring.annotations.ServiceDescription;
 import io.microservices.canvas.springmvc.MicroserviceCanvasWebConfiguration;
